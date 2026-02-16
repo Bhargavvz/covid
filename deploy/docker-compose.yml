@@ -1,0 +1,109 @@
+version: '3.9'
+
+services:
+  # ── PostgreSQL Database ────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: ct-postgres
+    environment:
+      POSTGRES_DB: ct_analysis
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── FastAPI Backend (GPU) ──────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: ct-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${DB_PASSWORD:-password}@postgres:5432/ct_analysis
+      SEGMENTATION_MODEL_PATH: /app/checkpoints/segmentation/best_model.pt
+      REGISTRATION_MODEL_PATH: /app/checkpoints/registration/best_model.pt
+      CLASSIFIER_MODEL_PATH: /app/checkpoints/classifier/best_model.pt
+      UPLOAD_DIR: /app/uploads
+      RESULTS_DIR: /app/results
+      MIXED_PRECISION: "true"
+      CORS_ORIGINS: "http://localhost,http://localhost:3000,http://localhost:5173"
+    volumes:
+      - uploads_data:/app/uploads
+      - results_data:/app/results
+      - checkpoints_data:/app/checkpoints
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ── React Frontend (Nginx) ────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    container_name: ct-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+  # ── Nginx Reverse Proxy ───────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ct-nginx
+    depends_on:
+      - backend
+      - frontend
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+  # ── MLflow Tracking Server ────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: ct-mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://postgres:${DB_PASSWORD:-password}@postgres:5432/mlflow
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+        --backend-store-uri postgresql://postgres:${DB_PASSWORD:-password}@postgres:5432/mlflow
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads_data:
+  results_data:
+  checkpoints_data:
+  mlflow_data:

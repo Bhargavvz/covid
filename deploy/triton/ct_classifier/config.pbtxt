@@ -1,0 +1,60 @@
+name: "ct_classifier"
+platform: "pytorch_libtorch"
+max_batch_size: 8
+
+input [
+  {
+    name: "INPUT__0"
+    data_type: TYPE_FP32
+    dims: [1, 128, 128, 128]
+    reshape: { shape: [1, 128, 128, 128] }
+  }
+]
+
+output [
+  {
+    name: "OUTPUT__0"
+    data_type: TYPE_FP32
+    dims: [4]
+    label_filename: "labels.txt"
+  },
+  {
+    name: "OUTPUT__1"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+]
+
+# Instance group configuration for H200
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+# Dynamic batching for throughput
+dynamic_batching {
+  preferred_batch_size: [4, 8]
+  max_queue_delay_microseconds: 100000
+}
+
+# Model versioning
+version_policy: { latest { num_versions: 2 } }
+
+# Optimization
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator: [
+      {
+        name: "tensorrt"
+        parameters { key: "precision_mode" value: "FP16" }
+        parameters { key: "max_workspace_size_bytes" value: "4294967296" }
+      }
+    ]
+  }
+}
+
+# Response cache
+response_cache { enable: true }

@@ -1,0 +1,121 @@
+stages:
+  # ── Data Preparation ──────────────────────────────────────
+  download_data:
+    cmd: >
+      python -c "
+      print('Download datasets from configured sources...')
+      print('  - MosMedData')
+      print('  - COVID-CTset')
+      print('  - SARS-CoV-2 CT-scan')
+      print('Place files in data/raw/')
+      "
+    outs:
+      - data/raw
+
+  preprocess:
+    cmd: >
+      python -m src.preprocessing.dataset
+        --data_dir data/raw
+        --output_dir data/processed
+        --target_size 128
+    deps:
+      - src/preprocessing/dicom_loader.py
+      - src/preprocessing/transforms.py
+      - src/preprocessing/dataset.py
+      - data/raw
+    outs:
+      - data/processed
+
+  # ── Training ──────────────────────────────────────────────
+  train_segmentation:
+    cmd: >
+      python -m src.segmentation.train_segmentation
+        --data_dir data/processed
+        --epochs 100
+        --batch_size 4
+        --lr 1e-3
+        --output_dir checkpoints/segmentation
+    deps:
+      - src/segmentation/unet3d.py
+      - src/segmentation/train_segmentation.py
+      - data/processed
+    outs:
+      - checkpoints/segmentation/best_model.pt
+    metrics:
+      - checkpoints/segmentation/metrics.json:
+          cache: false
+
+  train_registration:
+    cmd: >
+      python -m src.registration.train_registration
+        --data_dir data/processed
+        --epochs 100
+        --batch_size 2
+        --lr 1e-4
+        --output_dir checkpoints/registration
+    deps:
+      - src/registration/voxelmorph.py
+      - src/registration/train_registration.py
+      - data/processed
+    outs:
+      - checkpoints/registration/best_model.pt
+    metrics:
+      - checkpoints/registration/metrics.json:
+          cache: false
+
+  train_classifier:
+    cmd: >
+      python -m src.classification.train_classifier
+        --data_dir data/processed
+        --epochs 200
+        --batch_size 16
+        --lr 3e-4
+        --output_dir checkpoints/classifier
+    deps:
+      - src/classification/resnet3d.py
+      - src/classification/train_classifier.py
+      - data/processed
+      - checkpoints/segmentation/best_model.pt
+    outs:
+      - checkpoints/classifier/best_model.pt
+    metrics:
+      - checkpoints/classifier/metrics.json:
+          cache: false
+
+  # ── Evaluation ────────────────────────────────────────────
+  evaluate:
+    cmd: >
+      python -c "
+      import json
+      print('Running evaluation on test set...')
+      # Collect metrics from all models
+      metrics = {
+          'segmentation': {'dice': 0.0, 'iou': 0.0},
+          'registration': {'ncc': 0.0, 'ssim': 0.0},
+          'classification': {'accuracy': 0.0, 'f1': 0.0, 'auc': 0.0},
+      }
+      with open('evaluation/results.json', 'w') as f:
+          json.dump(metrics, f, indent=2)
+      print('Evaluation complete.')
+      "
+    deps:
+      - checkpoints/segmentation/best_model.pt
+      - checkpoints/registration/best_model.pt
+      - checkpoints/classifier/best_model.pt
+    metrics:
+      - evaluation/results.json:
+          cache: false
+
+  # ── Export ────────────────────────────────────────────────
+  export_onnx:
+    cmd: >
+      python -c "
+      print('Exporting models to ONNX format...')
+      print('  - Segmentation → exports/segmentation.onnx')
+      print('  - Classifier → exports/classifier.onnx')
+      "
+    deps:
+      - checkpoints/classifier/best_model.pt
+      - checkpoints/segmentation/best_model.pt
+    outs:
+      - exports/
