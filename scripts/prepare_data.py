@@ -46,10 +46,10 @@ MOSMED_URL = (
     "https://storage.yandexcloud.net/covid19.1110/prod/COVID19_1110.7z"
     "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
     "&X-Amz-Credential=J0yLHxYnLMK5SrRghejm%2F20260216%2Fru-central1%2Fs3%2Faws4_request"
-    "&X-Amz-Date=20260216T121036Z"
+    "&X-Amz-Date=20260216T132756Z"
     "&X-Amz-Expires=86400"
     "&X-Amz-SignedHeaders=host"
-    "&X-Amz-Signature=82a7a08079e50d539c39374ac349ff87d11cf34ca87d5e59f78830a7a6befd7b"
+    "&X-Amz-Signature=76da9616eb49896b7eb0849f23e7d1485f8d39653a61560cc864b074bad35f22"
 )
 
 COVIDCTSET_DRIVE_FOLDER = "1xdk-mCkxCDNwsMAk2SGv203rY1mrbnPB"
