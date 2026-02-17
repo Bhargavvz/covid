@@ -167,7 +167,7 @@ def main():
     logger.info(f"Device: {device}")
     if device.type == "cuda":
         logger.info(f"GPU: {torch.cuda.get_device_name()}")
-        logger.info(f"VRAM: {torch.cuda.get_device_properties(device).total_mem / 1e9:.1f} GB")
+        logger.info(f"VRAM: {torch.cuda.get_device_properties(device).total_memory / 1e9:.1f} GB")
 
     volume_size = tuple(args.volume_size)
     model = ResNet3D(
