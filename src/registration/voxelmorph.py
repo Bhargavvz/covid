@@ -225,10 +225,10 @@ class RegistrationLoss(nn.Module):
         self.window_size = window_size
 
     def ncc_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute local normalized cross-correlation loss."""
+        """Compute local normalized cross-correlation loss (NaN-safe)."""
         ndim = 3
         window = [self.window_size] * ndim
-        sum_filt = torch.ones([1, 1, *window], device=pred.device)
+        sum_filt = torch.ones([1, 1, *window], device=pred.device, dtype=pred.dtype)
         pad_size = [w // 2 for w in window]
 
         stride = [1] * ndim
@@ -249,7 +249,14 @@ class RegistrationLoss(nn.Module):
         pred_var = pred_sq_sum - 2 * pred_mean * pred_sum + pred_mean * pred_mean * win_size
         target_var = target_sq_sum - 2 * target_mean * target_sum + target_mean * target_mean * win_size
 
-        cc = cross * cross / (pred_var * target_var + 1e-5)
+        # Clamp variances to prevent negative values from FP16 precision
+        pred_var = torch.clamp(pred_var, min=0.0)
+        target_var = torch.clamp(target_var, min=0.0)
+
+        # Use larger epsilon for FP16 stability
+        cc = cross * cross / (pred_var * target_var + 1e-3)
+        cc = torch.clamp(cc, 0.0, 1.0)  # CC should be in [0, 1]
+
         return 1.0 - cc.mean()
 
     def gradient_loss(self, flow: torch.Tensor) -> torch.Tensor:
