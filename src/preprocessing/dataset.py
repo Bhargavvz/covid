@@ -69,7 +69,7 @@ class CTDataset(Dataset):
 
         self.image_paths = sorted([
             p for p in images_dir.iterdir()
-            if p.suffix in (".nii", ".gz", ".dcm") or p.is_dir()
+            if p.suffix in (".nii", ".gz", ".dcm", ".npz", ".npy") or p.is_dir()
         ])
 
         if max_samples:
@@ -124,6 +124,24 @@ class CTDataset(Dataset):
 
     def _load_and_preprocess(self, path: Path) -> np.ndarray:
         """Load and preprocess a single volume."""
+        # Handle .npz files (already preprocessed by prepare_data.py)
+        if path.suffix == ".npz":
+            try:
+                data = np.load(str(path))
+                return data["volume"].astype(np.float32)
+            except Exception as e:
+                logger.error(f"Failed to load .npz {path}: {e}")
+                return np.zeros(self.target_size, dtype=np.float32)
+
+        # Handle .npy files
+        if path.suffix == ".npy":
+            try:
+                return np.load(str(path)).astype(np.float32)
+            except Exception as e:
+                logger.error(f"Failed to load .npy {path}: {e}")
+                return np.zeros(self.target_size, dtype=np.float32)
+
+        # Handle raw NIfTI/DICOM files
         try:
             result = load_volume(str(path), return_metadata=True)
             if isinstance(result, tuple):
@@ -151,16 +169,28 @@ class CTDataset(Dataset):
         path = self.image_paths[idx]
         volume = self._load_and_preprocess(path)
 
-        stem = path.stem.replace(".nii", "")
-        label = self.labels.get(stem, 0)
+        # Try to get label from .npz metadata first
+        label = 0
+        severity_pct = 0.0
+        if path.suffix == ".npz":
+            try:
+                data = np.load(str(path))
+                label = int(data.get("severity_class", 0))
+                severity_pct = float(data.get("damage_percent", 0.0))
+            except Exception:
+                pass
+        else:
+            stem = path.stem.replace(".nii", "")
+            label = self.labels.get(stem, 0)
 
-        sample = {"image": volume, "label": label}
+        sample = {"image": volume, "label": label, "severity_pct": severity_pct}
 
         if self.transform:
             sample = self.transform(sample)
         else:
             sample["image"] = torch.from_numpy(volume).unsqueeze(0)  # Add channel dim
             sample["label"] = torch.tensor(label, dtype=torch.long)
+            sample["severity_pct"] = torch.tensor(severity_pct, dtype=torch.float32)
 
         return sample
 
@@ -299,27 +329,69 @@ def create_dataloaders(
             volume_size=target_size,
             task=task,
         )
+        # Split synthetic dataset
+        total = len(dataset)
+        test_size = int(total * test_split)
+        val_size = int(total * val_split)
+        train_size = total - val_size - test_size
+        train_ds, val_ds, test_ds = random_split(
+            dataset,
+            [train_size, val_size, test_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+        logger.info(f"Synthetic dataset split: train={train_size}, val={val_size}, test={test_size}")
     else:
-        dataset = CTDataset(
-            data_dir=data_dir,
-            task=task,
-            target_size=target_size,
-            transform=train_transform,
+        data_path = Path(data_dir)
+
+        # Check if data has pre-split directories (train/val/test)
+        has_splits = (
+            (data_path / "train" / "images").exists()
+            and (data_path / "val" / "images").exists()
         )
 
-    # Split dataset
-    total = len(dataset)
-    test_size = int(total * test_split)
-    val_size = int(total * val_split)
-    train_size = total - val_size - test_size
-
-    train_ds, val_ds, test_ds = random_split(
-        dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
-
-    logger.info(f"Dataset split: train={train_size}, val={val_size}, test={test_size}")
+        if has_splits:
+            logger.info(f"Using pre-split directories in {data_dir}")
+            train_ds = CTDataset(
+                data_dir=str(data_path / "train"),
+                task=task,
+                target_size=target_size,
+                transform=train_transform,
+            )
+            val_ds = CTDataset(
+                data_dir=str(data_path / "val"),
+                task=task,
+                target_size=target_size,
+                transform=val_transform,
+            )
+            # Test split is optional
+            if (data_path / "test" / "images").exists():
+                test_ds = CTDataset(
+                    data_dir=str(data_path / "test"),
+                    task=task,
+                    target_size=target_size,
+                    transform=val_transform,
+                )
+            else:
+                test_ds = val_ds
+            logger.info(f"Pre-split sizes: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}")
+        else:
+            # Single directory — use random_split
+            dataset = CTDataset(
+                data_dir=data_dir,
+                task=task,
+                target_size=target_size,
+                transform=train_transform,
+            )
+            total = len(dataset)
+            test_size = int(total * test_split)
+            val_size = int(total * val_split)
+            train_size = total - val_size - test_size
+            train_ds, val_ds, test_ds = random_split(
+                dataset,
+                [train_size, val_size, test_size],
+                generator=torch.Generator().manual_seed(42),
+            )
+            logger.info(f"Random split: train={train_size}, val={val_size}, test={test_size}")
 
     pin_memory = torch.cuda.is_available()
 
