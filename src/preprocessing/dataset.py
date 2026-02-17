@@ -192,7 +192,7 @@ class CTDataset(Dataset):
 
     def _augment_volume(self, volume: np.ndarray) -> np.ndarray:
         """Apply random 3D augmentations for training."""
-        # Random flips along each axis (50% chance each)
+        # Random flips along each axis (50% chance each) — anatomically valid
         if np.random.random() > 0.5:
             volume = np.flip(volume, axis=0).copy()  # axial
         if np.random.random() > 0.5:
@@ -200,25 +200,20 @@ class CTDataset(Dataset):
         if np.random.random() > 0.5:
             volume = np.flip(volume, axis=2).copy()  # sagittal
 
-        # Random intensity shift (brightness)
-        if np.random.random() > 0.5:
-            shift = np.random.uniform(-0.1, 0.1)
+        # Random intensity shift (brightness) — 30% chance
+        if np.random.random() > 0.7:
+            shift = np.random.uniform(-0.05, 0.05)
             volume = volume + shift
 
-        # Random intensity scale (contrast)
-        if np.random.random() > 0.5:
-            scale = np.random.uniform(0.9, 1.1)
+        # Random intensity scale (contrast) — 30% chance
+        if np.random.random() > 0.7:
+            scale = np.random.uniform(0.95, 1.05)
             volume = volume * scale
 
-        # Additive Gaussian noise
-        if np.random.random() > 0.5:
-            noise = np.random.normal(0, 0.02, volume.shape).astype(np.float32)
+        # Additive Gaussian noise — 30% chance, subtle
+        if np.random.random() > 0.7:
+            noise = np.random.normal(0, 0.01, volume.shape).astype(np.float32)
             volume = volume + noise
-
-        # Random 90-degree rotation in axial plane
-        if np.random.random() > 0.5:
-            k = np.random.choice([1, 2, 3])
-            volume = np.rot90(volume, k=k, axes=(1, 2)).copy()
 
         # Clip to valid range
         volume = np.clip(volume, 0.0, 1.0)

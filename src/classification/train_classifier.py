@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument("--cls_weight", type=float, default=1.0)
     parser.add_argument("--reg_weight", type=float, default=0.5)
     parser.add_argument("--focal_gamma", type=float, default=2.0)
+    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--local_rank", type=int, default=0)
     return parser.parse_args()
 
@@ -174,13 +175,14 @@ def main():
         in_channels=1,
         num_classes=args.num_classes,
         depth=args.resnet_depth,
+        dropout=args.dropout,
     ).to(device)
 
     if args.ddp:
         model = DDP(model, device_ids=[args.local_rank])
 
     params = sum(p.numel() for p in model.parameters())
-    logger.info(f"ResNet3D-{args.resnet_depth} parameters: {params:,}")
+    logger.info(f"ResNet3D-{args.resnet_depth} parameters: {params:,} (dropout={args.dropout})")
 
     train_loader, val_loader, test_loader = create_dataloaders(
         data_dir=args.data_dir,
@@ -192,11 +194,24 @@ def main():
         synthetic_samples=400,
     )
 
+    # Compute focal_alpha from training set class distribution
+    focal_alpha = None
+    if hasattr(train_loader.dataset, "get_labels"):
+        from collections import Counter
+        label_list = train_loader.dataset.get_labels()
+        counts = Counter(label_list)
+        n_total = len(label_list)
+        # Inverse frequency: rarer classes get higher weight
+        alpha_vals = [n_total / (args.num_classes * counts.get(c, 1)) for c in range(args.num_classes)]
+        focal_alpha = torch.tensor(alpha_vals, dtype=torch.float32)
+        logger.info(f"Focal alpha (class weights): {dict(zip(['Normal','Mild','Moderate','Severe'], [f'{a:.2f}' for a in alpha_vals]))}")
+
     criterion = MultiTaskLoss(
         num_classes=args.num_classes,
         cls_weight=args.cls_weight,
         reg_weight=args.reg_weight,
         focal_gamma=args.focal_gamma,
+        focal_alpha=focal_alpha,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
