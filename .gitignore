@@ -1,0 +1,38 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+env/
+
+# ── Data (too large for git) ──
+data/raw/
+data/processed/
+*.7z
+*.zip
+
+# ── Intermediate checkpoints (keep only best_model.pt via LFS) ──
+checkpoints/*/checkpoint_epoch_*.pt
+checkpoints/segmentation/
+
+# ── IDE / OS ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs (keep TensorBoard events) ──
+*.log
+
+# ── Node (frontend) ──
+node_modules/
+frontend/node_modules/
+frontend/dist/
