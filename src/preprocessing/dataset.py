@@ -11,10 +11,11 @@ import os
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable
+from collections import Counter
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, random_split
 
 from .dicom_loader import load_volume
 from .transforms import preprocess_volume
@@ -46,6 +47,7 @@ class CTDataset(Dataset):
         transform: Optional[Callable] = None,
         preprocess: bool = True,
         max_samples: Optional[int] = None,
+        augment: bool = False,
     ):
         """
         Args:
@@ -55,12 +57,14 @@ class CTDataset(Dataset):
             transform: Optional MONAI or custom transform to apply.
             preprocess: If True, apply standard preprocessing pipeline.
             max_samples: Limit number of samples (for debugging).
+            augment: If True, apply random 3D augmentations (flips, noise, intensity).
         """
         self.data_dir = Path(data_dir)
         self.task = task
         self.target_size = target_size
         self.transform = transform
         self.preprocess = preprocess
+        self.augment = augment
 
         # Discover image files
         images_dir = self.data_dir / "images"
@@ -77,14 +81,36 @@ class CTDataset(Dataset):
 
         logger.info(f"Found {len(self.image_paths)} volumes for task '{task}'")
 
-        # Load labels if classification task
-        self.labels = {}
+        # Pre-cache labels from .npz metadata for classification
+        self._cached_labels = {}
+        self._cached_damage = {}
         if task == "classification":
-            labels_file = self.data_dir / "labels.csv"
-            if labels_file.exists():
-                self._load_labels(labels_file)
+            # Try loading labels from .npz files first (fastest)
+            npz_count = 0
+            for p in self.image_paths:
+                if p.suffix == ".npz":
+                    try:
+                        data = np.load(str(p), allow_pickle=True)
+                        self._cached_labels[str(p)] = int(data["severity_class"])
+                        self._cached_damage[str(p)] = float(data["damage_percent"])
+                        npz_count += 1
+                    except Exception:
+                        self._cached_labels[str(p)] = 0
+                        self._cached_damage[str(p)] = 0.0
+            if npz_count > 0:
+                # Log class distribution
+                label_counts = Counter(self._cached_labels.values())
+                class_names = ["Normal", "Mild", "Moderate", "Severe"]
+                dist_str = ", ".join(f"{class_names[k]}={v}" for k, v in sorted(label_counts.items()))
+                logger.info(f"Labels from .npz: {dist_str}")
             else:
-                logger.warning(f"Labels file not found: {labels_file}. Using dummy labels.")
+                # Fallback to labels.csv
+                self.labels = {}
+                labels_file = self.data_dir / "labels.csv"
+                if labels_file.exists():
+                    self._load_labels(labels_file)
+                else:
+                    logger.warning(f"No labels found. Using dummy labels.")
 
         # Load mask paths if segmentation task
         self.mask_paths = {}
@@ -164,24 +190,60 @@ class CTDataset(Dataset):
 
         return volume
 
+    def _augment_volume(self, volume: np.ndarray) -> np.ndarray:
+        """Apply random 3D augmentations for training."""
+        # Random flips along each axis (50% chance each)
+        if np.random.random() > 0.5:
+            volume = np.flip(volume, axis=0).copy()  # axial
+        if np.random.random() > 0.5:
+            volume = np.flip(volume, axis=1).copy()  # coronal
+        if np.random.random() > 0.5:
+            volume = np.flip(volume, axis=2).copy()  # sagittal
+
+        # Random intensity shift (brightness)
+        if np.random.random() > 0.5:
+            shift = np.random.uniform(-0.1, 0.1)
+            volume = volume + shift
+
+        # Random intensity scale (contrast)
+        if np.random.random() > 0.5:
+            scale = np.random.uniform(0.9, 1.1)
+            volume = volume * scale
+
+        # Additive Gaussian noise
+        if np.random.random() > 0.5:
+            noise = np.random.normal(0, 0.02, volume.shape).astype(np.float32)
+            volume = volume + noise
+
+        # Random 90-degree rotation in axial plane
+        if np.random.random() > 0.5:
+            k = np.random.choice([1, 2, 3])
+            volume = np.rot90(volume, k=k, axes=(1, 2)).copy()
+
+        # Clip to valid range
+        volume = np.clip(volume, 0.0, 1.0)
+
+        return volume
+
+    def get_labels(self) -> List[int]:
+        """Return list of labels for all samples (for WeightedRandomSampler)."""
+        labels = []
+        for p in self.image_paths:
+            labels.append(self._cached_labels.get(str(p), 0))
+        return labels
+
     def _get_classification_item(self, idx: int) -> Dict[str, Any]:
         """Get a single (volume, label) pair."""
         path = self.image_paths[idx]
         volume = self._load_and_preprocess(path)
 
-        # Try to get label from .npz metadata first
-        label = 0
-        severity_pct = 0.0
-        if path.suffix == ".npz":
-            try:
-                data = np.load(str(path))
-                label = int(data.get("severity_class", 0))
-                severity_pct = float(data.get("damage_percent", 0.0))
-            except Exception:
-                pass
-        else:
-            stem = path.stem.replace(".nii", "")
-            label = self.labels.get(stem, 0)
+        # Get label from cache (populated during __init__)
+        label = self._cached_labels.get(str(path), 0)
+        severity_pct = self._cached_damage.get(str(path), 0.0)
+
+        # Apply augmentation if enabled
+        if self.augment:
+            volume = self._augment_volume(volume)
 
         sample = {"image": volume, "label": label, "severity_pct": severity_pct}
 
@@ -356,6 +418,7 @@ def create_dataloaders(
                 task=task,
                 target_size=target_size,
                 transform=train_transform,
+                augment=True,  # Enable augmentation for training
             )
             val_ds = CTDataset(
                 data_dir=str(data_path / "val"),
@@ -395,10 +458,31 @@ def create_dataloaders(
 
     pin_memory = torch.cuda.is_available()
 
+    # Build class-weighted sampler for classification tasks
+    train_sampler = None
+    train_shuffle = True
+    if task == "classification" and hasattr(train_ds, "get_labels"):
+        labels = train_ds.get_labels()
+        class_counts = Counter(labels)
+        num_samples = len(labels)
+        # Inverse frequency weighting
+        class_weights = {c: num_samples / count for c, count in class_counts.items()}
+        sample_weights = [class_weights[l] for l in labels]
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=num_samples,
+            replacement=True,
+        )
+        train_shuffle = False  # sampler and shuffle are mutually exclusive
+        class_names = {0: "Normal", 1: "Mild", 2: "Moderate", 3: "Severe"}
+        weight_str = ", ".join(f"{class_names.get(k, k)}={v:.2f}" for k, v in sorted(class_weights.items()))
+        logger.info(f"Class-weighted sampling enabled: {weight_str}")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
